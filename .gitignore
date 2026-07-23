@@ -1,0 +1,6 @@
+/build/
+/models/
+__pycache__/
+*.pyc
+
+/third-party/

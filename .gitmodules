@@ -1,0 +1,6 @@
+[submodule "third-party/onnxruntime"]
+	path = third-party/onnxruntime
+	url = https://github.com/microsoft/onnxruntime.git
+[submodule "third-party/onnxruntime-genai"]
+	path = third-party/onnxruntime-genai
+	url = https://github.com/microsoft/onnxruntime-genai.git
