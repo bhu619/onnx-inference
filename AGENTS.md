@@ -21,7 +21,7 @@
 ## 构建
 
 ```bash
-./scripts/init_submodules.sh   # 初始化 third-party 子模块（含嵌套子模块）
+./scripts/init_submodules.sh --all   # 初始化 third-party 子模块（含嵌套子模块）
 
 ./third-party/onnxruntime/build.sh \
   --config RelWithDebInfo \
