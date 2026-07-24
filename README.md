@@ -85,12 +85,13 @@ cd onnx-inference
 ### 5.1 使用初始化脚本（推荐）
 
 ```bash
-./scripts/init_submodules.sh                    # 初始化全部子模块
-./scripts/init_submodules.sh onnxruntime        # 仅初始化指定子模块
-./scripts/init_submodules.sh --dry-run          # 仅打印将执行的命令，不执行
+./scripts/init_submodules.sh --all              # 初始化全部子模块
+./scripts/init_submodules.sh -s onnxruntime     # 仅初始化指定子模块
+./scripts/init_submodules.sh --all --dry-run    # 仅打印将执行的命令，不执行
 ```
 
-可选子模块为 `onnxruntime` 和 `onnxruntime-genai`，可同时指定多个；完整用法见 `--help`。
+支持 `--submodule / -s` 选择子模块（可重复使用或逗号分隔），`--all` 全量初始化，
+`--dry-run` 预览命令；无参数时显示帮助。完整用法见 `--help`。
 脚本先同步 `.gitmodules` 中的 URL，再执行递归初始化；主仓库更新子模块版本后重新运行即可。
 
 ### 5.2 使用 Git 命令
