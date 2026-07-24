@@ -11,9 +11,9 @@
 
 | 目标 | 源文件 | 说明 |
 | --- | --- | --- |
-| `qwen3_5_ort` | `src/qwen3_5_ort.cpp` + `src/qwen_tokenizer.cpp` | 默认示例，Qwen3.5-0.8B，纯 ONNX Runtime C++ API |
+| `qwen3_5_ort` | `src/main.cpp` + `src/qwen3_5_ort.cpp` + `src/qwen_tokenizer.cpp` | 默认示例，Qwen3.5-0.8B，纯 ONNX Runtime C++ API |
 | `inspect_onnx` | `tools/inspect_onnx.cpp` | ONNX 模型输入输出检查工具 |
-| `qwen3_infer` | `src/main.cpp` | 可选示例，Qwen3-0.6B，依赖 ONNX Runtime GenAI |
+| `qwen3_infer` | `src/main.cpp` + `src/qwen3_genai.cpp` | 可选示例，Qwen3-0.6B，依赖 ONNX Runtime GenAI（编译宏 `QWEN_BACKEND_GENAI`） |
 
 两个推理示例相互独立：`qwen3_5_ort` 不链接 GenAI，`qwen3_infer` 不使用
 `qwen_tokenizer`。
@@ -62,8 +62,11 @@ cmake --build build -j
 ## 代码约定
 
 - C++17，2 空格缩进；源码注释采用英文，README 等文档用中文。
+- `src/main.cpp` 是两个二进制的共享入口，通过编译宏 `QWEN_BACKEND_GENAI`
+  分发到对应后端；推理逻辑分别位于 `src/qwen3_5_ort.cpp` 与
+  `src/qwen3_genai.cpp`，公共接口见 `include/` 下的同名头文件。
 - 改动尽量小：两个示例相互独立，不要为它们引入不必要的共享抽象；
-  分词器改动只进 `src/qwen_tokenizer.{h,cpp}`。
+  分词器改动只进 `src/qwen_tokenizer.cpp` 与 `include/qwen_tokenizer.h`。
 - 修改构建选项、目录结构、命令行参数或功能特性时，同步更新 README.md。
 
 ## 注意事项

@@ -1,3 +1,7 @@
+// Qwen3.5-0.8B inference on the ONNX Runtime C++ API: ByteLevel BPE
+// tokenization, chat template, embedding + decoder graph execution with
+// recurrent state and KV cache, and greedy or top-k/top-p sampling.
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -13,14 +17,17 @@
 #include <vector>
 
 #include "onnxruntime_cxx_api.h"
+#include "qwen3_5_ort.h"
 #include "qwen_tokenizer.h"
 
 namespace fs = std::filesystem;
 
+// Special token ids and vocabulary size of Qwen3.5-0.8B; must match the model.
 constexpr int64_t kEos = 248044;
 constexpr int64_t kImEnd = 248046;
 constexpr size_t kVocabSize = 248320;
 
+// Command-line options; see Usage() for the accepted flags and defaults.
 struct Options {
   fs::path model = "/home/ubuntu/.cache/models/Qwen3.5-0.8B-ONNX-OPT";
   std::string prompt;
@@ -86,6 +93,8 @@ Options ParseArgs(int argc, char** argv) {
   return o;
 }
 
+// Builds the chat prompt manually: system and user turns, then an assistant
+// opener. An immediately closed <think> block disables thinking mode.
 std::string ChatPrompt(const Options& o) {
   std::string prompt = "<|im_start|>system\n" + o.system + "<|im_end|>\n";
   prompt += "<|im_start|>user\n" + o.prompt + "<|im_end|>\n";
@@ -94,6 +103,7 @@ std::string ChatPrompt(const Options& o) {
   return prompt;
 }
 
+// Returns the input or output names of a session, in graph order.
 std::vector<std::string> Names(Ort::Session& session, bool inputs) {
   Ort::AllocatorWithDefaultOptions allocator;
   const size_t count = inputs ? session.GetInputCount() : session.GetOutputCount();
@@ -106,12 +116,14 @@ std::vector<std::string> Names(Ort::Session& session, bool inputs) {
   return names;
 }
 
+// Stable C-string views over a name list, as required by Ort::Session::Run.
 std::vector<const char*> Pointers(const std::vector<std::string>& names) {
   std::vector<const char*> result;
   for (const auto& name : names) result.push_back(name.c_str());
   return result;
 }
 
+// Allocates a zero-filled float tensor; used for the initial decoder states.
 Ort::Value ZeroTensor(Ort::AllocatorWithDefaultOptions& allocator,
                       const std::vector<int64_t>& shape) {
   auto value = Ort::Value::CreateTensor<float>(allocator, shape.data(), shape.size());
@@ -120,6 +132,9 @@ Ort::Value ZeroTensor(Ort::AllocatorWithDefaultOptions& allocator,
   return value;
 }
 
+// Selects the next token from the logits: greedy argmax, or top-k filtering
+// followed by a temperature softmax and top-p (nucleus) truncation. The
+// presence penalty subtracts a fixed value from tokens already generated.
 int64_t SelectToken(float* logits, const Options& o, const std::unordered_set<int64_t>& seen,
                     std::mt19937& random) {
   if (o.presence_penalty != 0) {
@@ -146,7 +161,7 @@ int64_t SelectToken(float* logits, const Options& o, const std::unordered_set<in
   return ids[std::discrete_distribution<size_t>(probabilities.begin(), probabilities.end())(random)];
 }
 
-int main(int argc, char** argv) {
+int run_qwen3_5_ort(int argc, char** argv) {
   try {
     const Options options = ParseArgs(argc, argv);
     const fs::path embed_path = options.model / "onnx/embed_tokens_q4.onnx";
@@ -154,6 +169,7 @@ int main(int argc, char** argv) {
     for (const auto& path : {embed_path, decoder_path, options.model / "tokenizer.json"})
       if (!fs::is_regular_file(path)) throw std::runtime_error("missing file: " + path.string());
 
+    // Load the tokenizer and both ONNX graphs (embedding + merged decoder).
     std::cerr << "Loading tokenizer and ONNX sessions...\n";
     QwenTokenizer tokenizer((options.model / "tokenizer.json").string());
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "qwen3_5-ort");
@@ -174,6 +190,11 @@ int main(int argc, char** argv) {
 
     Ort::AllocatorWithDefaultOptions allocator;
     Ort::MemoryInfo cpu = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    // Initial decoder states, aligned with the graph inputs that follow
+    // inputs_embeds / attention_mask / position_ids / keep_logits:
+    //   past_conv.*      -> {1, 6144, 3}      (short conv state)
+    //   past_recurrent.* -> {1, 16, 128, 128} (recurrent state)
+    //   remaining        -> {1, 2, 0, 256}    (empty KV cache)
     std::vector<Ort::Value> states;
     for (size_t i = 4; i < decoder_inputs.size(); ++i) {
       const std::string& name = decoder_inputs[i];
@@ -188,6 +209,7 @@ int main(int argc, char** argv) {
     const auto started = std::chrono::steady_clock::now();
     auto first_token_time = started;
     size_t generated = 0;
+    // Prefill the full prompt, then decode one token per iteration.
     for (; generated < static_cast<size_t>(options.max_new_tokens); ++generated) {
       std::vector<int64_t> ids_shape{1, static_cast<int64_t>(current_ids.size())};
       auto ids_tensor = Ort::Value::CreateTensor<int64_t>(cpu, current_ids.data(), current_ids.size(),
@@ -197,6 +219,8 @@ int main(int argc, char** argv) {
 
       const int64_t sequence = static_cast<int64_t>(current_ids.size());
       std::vector<int64_t> mask(static_cast<size_t>(past_length + sequence), 1);
+      // MRoPE position_ids with shape [3, 1, seq]; for text, all three axes
+      // carry the same ascending positions.
       std::vector<int64_t> positions(static_cast<size_t>(3 * sequence));
       for (int axis = 0; axis < 3; ++axis)
         for (int64_t i = 0; i < sequence; ++i) positions[static_cast<size_t>(axis * sequence + i)] = past_length + i;
@@ -216,6 +240,7 @@ int main(int argc, char** argv) {
       auto outputs = decoder.Run(Ort::RunOptions{nullptr}, decoder_input_ptrs.data(), inputs.data(), inputs.size(),
                                  decoder_output_ptrs.data(), decoder_output_ptrs.size());
       past_length += sequence;
+      // Outputs after the logits become the next step's recurrent/KV states.
       states.clear();
       states.reserve(outputs.size() - 1);
       for (size_t i = 1; i < outputs.size(); ++i) states.push_back(std::move(outputs[i]));
@@ -233,6 +258,7 @@ int main(int argc, char** argv) {
     std::cout << "\n\n[prompt=" << prompt_tokens << " tokens, generated=" << generated
               << ", first-token=" << std::fixed << std::setprecision(3) << first
               << "s, throughput=" << (elapsed > 0 ? generated / elapsed : 0) << " token/s]\n";
+    return 0;
   } catch (const Ort::Exception& e) {
     std::cerr << "ONNX Runtime error: " << e.what() << '\n';
     return 1;
@@ -241,4 +267,3 @@ int main(int argc, char** argv) {
     return 1;
   }
 }
-

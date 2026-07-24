@@ -1,3 +1,7 @@
+// ByteLevel BPE tokenizer for Qwen models; see qwen_tokenizer.h for the
+// high-level pipeline. This file implements UTF-8 handling, the Qwen
+// pretokenizer, BPE merging, and byte-level encode/decode.
+
 #include "qwen_tokenizer.h"
 
 #include <algorithm>
@@ -10,6 +14,8 @@
 #include <nlohmann/json.hpp>
 
 namespace {
+
+// UTF-8 helpers and Unicode character classes used by the pretokenizer.
 
 struct Rune {
   uint32_t codepoint;
@@ -118,14 +124,17 @@ QwenTokenizer::QwenTokenizer(const std::string& tokenizer_json) {
   }
   id_to_token_.resize(static_cast<size_t>(max_id + 1));
   for (const auto& item : vocab_) id_to_token_[static_cast<size_t>(item.second)] = item.first;
+  // Longest first, so overlapping added tokens match greedily.
   std::sort(specials_by_length_.begin(), specials_by_length_.end(),
             [](const auto& a, const auto& b) { return a.size() > b.size(); });
 
+  // BPE merge ranks; lower rank merges first.
   size_t rank = 0;
   for (const auto& merge : config["model"]["merges"]) {
     merge_rank_.emplace(std::make_pair(merge[0].get<std::string>(), merge[1].get<std::string>()), rank++);
   }
 
+  // GPT-2 style byte-to-unicode table: printable symbols for all 256 bytes.
   std::vector<int> bytes;
   for (int c = '!'; c <= '~'; ++c) bytes.push_back(c);
   for (int c = 0xa1; c <= 0xac; ++c) bytes.push_back(c);
@@ -216,6 +225,7 @@ std::vector<std::string> QwenTokenizer::ByteEncode(const std::string& text) cons
 
 std::vector<std::string> QwenTokenizer::Bpe(const std::string& piece) const {
   auto symbols = ByteEncode(piece);
+  // Repeatedly merge the lowest-rank adjacent pair until no merge applies.
   while (symbols.size() > 1) {
     size_t best_rank = std::numeric_limits<size_t>::max();
     size_t best_index = symbols.size();
@@ -236,6 +246,7 @@ std::vector<std::string> QwenTokenizer::Bpe(const std::string& piece) const {
 std::vector<int64_t> QwenTokenizer::Encode(const std::string& text) const {
   std::vector<int64_t> ids;
   size_t position = 0;
+  // Added tokens are matched atomically; spans between them are BPE-encoded.
   while (position < text.size()) {
     const std::string* special = nullptr;
     for (const auto& candidate : specials_by_length_) {
@@ -268,6 +279,7 @@ std::string QwenTokenizer::DecodeToken(int64_t id, bool skip_special) const {
   if (id_to_special_.count(id))
     return skip_special && skip_special_ids_.count(id) ? std::string{} : id_to_special_.at(id);
   if (id < 0 || static_cast<size_t>(id) >= id_to_token_.size()) return {};
+  // Convert byte-level symbols back to raw UTF-8 bytes.
   const std::string& token = id_to_token_[static_cast<size_t>(id)];
   std::string result;
   for (const auto& rune : DecodeUtf8(token)) {

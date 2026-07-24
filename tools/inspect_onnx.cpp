@@ -1,9 +1,13 @@
+// Prints the input/output names, element types, and shapes of an ONNX model,
+// for checking graph interfaces without running inference.
+
 #include <iostream>
 #include <string>
 #include <vector>
 
 #include "onnxruntime_cxx_api.h"
 
+// Human-readable names for common tensor element types.
 const char* TypeName(ONNXTensorElementDataType type) {
   switch (type) {
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT: return "float32";
@@ -21,6 +25,8 @@ const char* TypeName(ONNXTensorElementDataType type) {
   }
 }
 
+// Prints one value as "kind[i] name : type [d0, d1, ...]"; dynamic dimensions
+// show their symbolic name, or '?' when unnamed.
 void PrintValue(const std::string& kind, size_t index, const char* name, const Ort::TypeInfo& info) {
   auto tensor = info.GetTensorTypeAndShapeInfo();
   std::cout << kind << '[' << index << "] " << name << " : "
@@ -44,6 +50,7 @@ int main(int argc, char** argv) {
   try {
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "inspect-onnx");
     Ort::SessionOptions options;
+    // Keep the graph unmodified so reported shapes match the model file.
     options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_DISABLE_ALL);
     Ort::Session session(env, argv[1], options);
     Ort::AllocatorWithDefaultOptions allocator;
