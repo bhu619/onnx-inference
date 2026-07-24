@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iomanip>
@@ -27,9 +28,17 @@ constexpr int64_t kEos = 248044;
 constexpr int64_t kImEnd = 248046;
 constexpr size_t kVocabSize = 248320;
 
+fs::path DefaultModelPath() {
+  const char* home = std::getenv("HOME");
+  if (home == nullptr || *home == '\0') {
+    throw std::runtime_error("HOME is not set; specify the model directory with --model");
+  }
+  return fs::path(home) / ".cache/models/Qwen3.5-0.8B-ONNX-OPT";
+}
+
 // Command-line options; see Usage() for the accepted flags and defaults.
 struct Options {
-  fs::path model = "/home/ubuntu/.cache/models/Qwen3.5-0.8B-ONNX-OPT";
+  fs::path model;
   std::string prompt;
   std::string system = "You are a helpful assistant.";
   int max_new_tokens = 128;
@@ -46,7 +55,7 @@ struct Options {
 [[noreturn]] void Usage(const char* exe, const std::string& error = {}) {
   if (!error.empty()) std::cerr << "Error: " << error << "\n\n";
   std::cerr << "Usage: " << exe << " --prompt TEXT [options]\n\n"
-            << "  --model DIR              Model root (default: Qwen3.5-0.8B-ONNX-OPT cache path)\n"
+            << "  --model DIR              Model root (default: ~/.cache/models/Qwen3.5-0.8B-ONNX-OPT)\n"
             << "  --prompt TEXT            User prompt; reads one stdin line if omitted\n"
             << "  --system TEXT            System message\n"
             << "  --max-new-tokens N       Generation limit (default: 128)\n"
@@ -88,6 +97,7 @@ Options ParseArgs(int argc, char** argv) {
   }
   if (o.prompt.empty()) std::getline(std::cin, o.prompt);
   if (o.prompt.empty()) Usage(argv[0], "prompt must not be empty");
+  if (o.model.empty()) o.model = DefaultModelPath();
   if (o.max_new_tokens <= 0 || o.top_k <= 0 || o.temperature <= 0 || o.top_p <= 0 || o.top_p > 1)
     Usage(argv[0], "invalid generation option");
   return o;

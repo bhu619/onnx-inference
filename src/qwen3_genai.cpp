@@ -18,11 +18,19 @@
 
 namespace fs = std::filesystem;
 
+std::string DefaultModelPath() {
+  const char* home = std::getenv("HOME");
+  if (home == nullptr || *home == '\0') {
+    throw std::runtime_error("HOME is not set; specify the model directory with --model");
+  }
+  return (fs::path(home) / ".cache/models/Qwen3-0.6B-onnx-genai" /
+          "cpu_and_mobile/cpu-int4-rtn-block-32")
+      .string();
+}
+
 // Command-line options; see Usage() for the accepted flags and defaults.
 struct Options {
-  std::string model =
-      "/home/ubuntu/.cache/models/Qwen3-0.6B-onnx-genai/"
-      "cpu_and_mobile/cpu-int4-rtn-block-32";
+  std::string model;
   std::string prompt;
   std::string system = "You are a helpful assistant.";
   int max_new_tokens = 256;
@@ -40,7 +48,9 @@ struct Options {
   std::cerr
       << "Usage: " << program << " --prompt TEXT [options]\n\n"
       << "Options:\n"
-      << "  --model DIR                ORT GenAI model directory (default: Qwen3-0.6B CPU INT4)\n"
+      << "  --model DIR                ORT GenAI model directory "
+         "(default: ~/.cache/models/Qwen3-0.6B-onnx-genai/"
+         "cpu_and_mobile/cpu-int4-rtn-block-32)\n"
       << "  --prompt TEXT              User prompt; if omitted, read one line from stdin\n"
       << "  --system TEXT              System prompt\n"
       << "  --max-new-tokens N         Maximum generated tokens (default: 256)\n"
@@ -81,6 +91,7 @@ Options ParseArgs(int argc, char** argv) {
   if (o.max_new_tokens <= 0) Usage(argv[0], "--max-new-tokens must be positive");
   if (o.prompt.empty()) std::getline(std::cin, o.prompt);
   if (o.prompt.empty()) Usage(argv[0], "prompt must not be empty");
+  if (o.model.empty()) o.model = DefaultModelPath();
   return o;
 }
 
