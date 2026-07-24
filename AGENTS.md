@@ -31,7 +31,7 @@
 
 cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
+cmake --build build -j$(nproc)
 ```
 
 - ONNX Runtime 和 ONNX Runtime GenAI 位于 `third-party/` Git 子模块，
@@ -48,7 +48,7 @@ cmake --build build -j
 
 仓库没有自动化测试。改动后按以下方式验证：
 
-1. `cmake --build build -j` 编译通过（需先按上文构建 ONNX Runtime 子模块）。
+1. `cmake --build build -j$(nproc)` 编译通过（需先按上文构建 ONNX Runtime 子模块）。
 2. 涉及 `qwen3_5_ort` 或分词器的改动，用真实模型跑一次推理确认输出正常：
 
    ```bash
@@ -64,8 +64,9 @@ cmake --build build -j
 - C++17，2 空格缩进；源码注释采用英文，README 等文档用中文。
 - `src/main.cpp` 是两个二进制的共享入口，通过编译宏 `QWEN_BACKEND_GENAI`
   分发到对应后端；推理逻辑分别位于 `src/qwen3_5_ort.cpp` 与
-  `src/qwen3_genai.cpp`，公共接口见 `include/` 下的同名头文件。
-- 改动尽量小：两个示例相互独立，不要为它们引入不必要的共享抽象；
+  `src/qwen3_genai.cpp`，公共接口见 `include/` 下的同名头文件；交互终端公共逻辑位于
+  `include/terminal_ui.h`。
+- 改动尽量小：两个推理后端相互独立，仅共享与后端无关的交互终端逻辑；
   分词器改动只进 `src/qwen_tokenizer.cpp` 与 `include/qwen_tokenizer.h`。
 - 修改构建选项、目录结构、命令行参数或功能特性时，同步更新 README.md。
 

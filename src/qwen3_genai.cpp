@@ -1,7 +1,6 @@
 // Qwen3-0.6B inference on ONNX Runtime GenAI: chat template through the
 // GenAI tokenizer API and generator-driven decoding with streaming output.
 
-#include <algorithm>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
@@ -15,18 +14,9 @@
 #include "ort_genai.h"
 
 #include "qwen3_genai.h"
+#include "terminal_ui.h"
 
 namespace fs = std::filesystem;
-
-std::string DefaultModelPath() {
-  const char* home = std::getenv("HOME");
-  if (home == nullptr || *home == '\0') {
-    throw std::runtime_error("HOME is not set; specify the model directory with --model");
-  }
-  return (fs::path(home) / ".cache/models/Qwen3-0.6B-onnx-genai" /
-          "cpu_and_mobile/cpu-int4-rtn-block-32")
-      .string();
-}
 
 // Command-line options; see Usage() for the accepted flags and defaults.
 struct Options {
@@ -51,7 +41,7 @@ struct Options {
       << "  --model DIR                ORT GenAI model directory "
          "(default: ~/.cache/models/Qwen3-0.6B-onnx-genai/"
          "cpu_and_mobile/cpu-int4-rtn-block-32)\n"
-      << "  --prompt TEXT              User prompt; if omitted, read one line from stdin\n"
+      << "  --prompt TEXT              Initial prompt for the interactive session\n"
       << "  --system TEXT              System prompt\n"
       << "  --max-new-tokens N         Maximum generated tokens (default: 256)\n"
       << "  --sample                   Enable sampling (greedy by default)\n"
@@ -89,9 +79,10 @@ Options ParseArgs(int argc, char** argv) {
     else Usage(argv[0], "unknown option: " + arg);
   }
   if (o.max_new_tokens <= 0) Usage(argv[0], "--max-new-tokens must be positive");
-  if (o.prompt.empty()) std::getline(std::cin, o.prompt);
-  if (o.prompt.empty()) Usage(argv[0], "prompt must not be empty");
-  if (o.model.empty()) o.model = DefaultModelPath();
+  if (o.model.empty()) {
+    o.model = terminal_ui::ModelCachePath(
+        "Qwen3-0.6B-onnx-genai/cpu_and_mobile/cpu-int4-rtn-block-32").string();
+  }
   return o;
 }
 
@@ -145,6 +136,7 @@ std::string MakePrompt(const Options& options, const OgaTokenizer& tokenizer) {
 int run_qwen3_genai(int argc, char** argv) {
   try {
     const Options options = ParseArgs(argc, argv);
+    terminal_ui::InstallInterruptHandler();
     if (!fs::is_regular_file(fs::path(options.model) / "genai_config.json")) {
       throw std::runtime_error(
           "invalid ONNX Runtime GenAI model directory: " + options.model +
@@ -153,43 +145,56 @@ int run_qwen3_genai(int argc, char** argv) {
     }
 
     OgaHandle oga_handle;
+    terminal_ui::PrintLoadingMessage();
     auto model = OgaModel::Create(options.model.c_str());
     auto tokenizer = OgaTokenizer::Create(*model);
-    auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+    terminal_ui::PrintChatHeader(options.model);
+    Options request = options;
+    while (true) {
+      if (!terminal_ui::ReadPrompt(request.prompt)) break;
 
-    const std::string prompt = MakePrompt(options, *tokenizer);
-    auto input = OgaSequences::Create();
-    tokenizer->Encode(prompt.c_str(), *input);
-    const size_t prompt_tokens = input->SequenceCount(0);
+      auto tokenizer_stream = OgaTokenizerStream::Create(*tokenizer);
+      const std::string prompt = MakePrompt(request, *tokenizer);
+      auto input = OgaSequences::Create();
+      tokenizer->Encode(prompt.c_str(), *input);
+      const size_t prompt_tokens = input->SequenceCount(0);
 
-    // Map CLI sampling options onto GenAI search options.
-    auto params = OgaGeneratorParams::Create(*model);
-    params->SetSearchOption("max_length", static_cast<double>(prompt_tokens + options.max_new_tokens));
-    params->SetSearchOption("batch_size", 1);
-    params->SetSearchOptionBool("do_sample", options.sample);
-    params->SetSearchOption("temperature", options.temperature);
-    params->SetSearchOption("top_p", options.top_p);
-    params->SetSearchOption("top_k", options.top_k);
-    params->SetSearchOption("repetition_penalty", options.repetition_penalty);
+      // Map CLI sampling options onto GenAI search options.
+      auto params = OgaGeneratorParams::Create(*model);
+      params->SetSearchOption("max_length", static_cast<double>(prompt_tokens + request.max_new_tokens));
+      params->SetSearchOption("batch_size", 1);
+      params->SetSearchOptionBool("do_sample", request.sample);
+      params->SetSearchOption("temperature", request.temperature);
+      params->SetSearchOption("top_p", request.top_p);
+      params->SetSearchOption("top_k", request.top_k);
+      params->SetSearchOption("repetition_penalty", request.repetition_penalty);
 
-    auto generator = OgaGenerator::Create(*model, *params);
-    const auto started = std::chrono::steady_clock::now();
-    generator->AppendTokenSequences(*input);
+      auto generator = OgaGenerator::Create(*model, *params);
+      terminal_ui::TerminalOutput output(request.think && !request.raw_prompt);
+      terminal_ui::GenerationGuard generation;
+      const auto started = std::chrono::steady_clock::now();
+      generator->AppendTokenSequences(*input);
 
-    auto first_token = started;
-    size_t generated = 0;
-    while (!generator->IsDone()) {
-      generator->GenerateNextToken();
-      if (generated++ == 0) first_token = std::chrono::steady_clock::now();
-      std::cout << tokenizer_stream->Decode(generator->GetNextTokens()[0]) << std::flush;
+      auto first_token = started;
+      size_t generated = 0;
+      while (!generator->IsDone() && !generation.Interrupted()) {
+        generator->GenerateNextToken();
+        if (generated++ == 0) first_token = std::chrono::steady_clock::now();
+        output.Write(tokenizer_stream->Decode(generator->GetNextTokens()[0]));
+      }
+      generation.Finish();
+      const auto finished = std::chrono::steady_clock::now();
+      const double prompt_seconds =
+          std::chrono::duration<double>(first_token - started).count();
+      const double generation_seconds =
+          std::chrono::duration<double>(finished - first_token).count();
+      output.Finish();
+      terminal_ui::PrintStats(
+          prompt_tokens, generated, prompt_seconds,
+          prompt_seconds > 0 ? prompt_tokens / prompt_seconds : 0.0,
+          generation_seconds > 0 ? generated / generation_seconds : 0.0);
+      request.prompt.clear();
     }
-    const auto finished = std::chrono::steady_clock::now();
-    const double total_seconds = std::chrono::duration<double>(finished - started).count();
-    const double first_seconds = std::chrono::duration<double>(first_token - started).count();
-    std::cout << "\n\n[prompt=" << prompt_tokens << " tokens, generated=" << generated
-              << ", first-token=" << std::fixed << std::setprecision(3) << first_seconds
-              << "s, throughput=" << (total_seconds > 0 ? generated / total_seconds : 0.0)
-              << " token/s]\n";
     return 0;
   } catch (const std::exception& e) {
     std::cerr << "Inference failed: " << e.what() << '\n';

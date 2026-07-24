@@ -37,7 +37,8 @@ Transformers，通过 ONNX Runtime C++ API 完成分词、Chat Template、图执
 ├── include/
 │   ├── qwen3_5_ort.h           # Qwen3.5-0.8B 推理接口
 │   ├── qwen3_genai.h           # Qwen3-0.6B 推理接口
-│   └── qwen_tokenizer.h        # Qwen BPE 分词器接口
+│   ├── qwen_tokenizer.h        # Qwen BPE 分词器接口
+│   └── terminal_ui.h           # 交互终端、分段着色与统计输出
 ├── src/
 │   ├── main.cpp                # 共享入口（按编译宏分发到推理后端）
 │   ├── qwen3_5_ort.cpp         # Qwen3.5-0.8B 推理（ONNX Runtime C++ API）
@@ -171,7 +172,7 @@ Qwen3.5-0.8B-ONNX-OPT/
 cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release
 
-cmake --build build -j
+cmake --build build -j$(nproc)
 ```
 
 构建产物为 `build/qwen3_5_ort`。默认配置使用子模块目录 `third-party/onnxruntime` 及其 `build/Linux/RelWithDebInfo` 构建输出；CMake 会写入运行时库搜索路径，因此运行时无需设置 `LD_LIBRARY_PATH`。
@@ -187,12 +188,21 @@ cmake -S . -B build \
 
 ### 7.3 运行
 
+程序始终以交互模式运行。不指定 `--prompt` 时直接显示输入提示符：
+
+```bash
+./build/qwen3_5_ort \
+  --think \
+  --max-new-tokens 512 \
+  --threads 4
+```
+
 基本推理（默认非思考模式）：
 
 ```bash
 ./build/qwen3_5_ort \
   --prompt "用三句话介绍一下北京" \
-  --max-new-tokens 128 \
+  --max-new-tokens 256 \
   --threads 4
 ```
 
@@ -200,9 +210,9 @@ cmake -S . -B build \
 
 ```bash
 ./build/qwen3_5_ort \
-  --prompt "计算 17 * 29，并解释计算过程" \
+  --prompt "hello, who are you?" \
   --think \
-  --max-new-tokens 256 \
+  --max-new-tokens 512 \
   --threads 4
 ```
 
@@ -216,7 +226,7 @@ cmake -S . -B build \
   --top-k 20 \
   --top-p 0.95 \
   --presence-penalty 1.5 \
-  --max-new-tokens 128 \
+  --max-new-tokens 256 \
   --threads 4
 ```
 
@@ -225,7 +235,7 @@ cmake -S . -B build \
 | 参数 | 说明 |
 | --- | --- |
 | `--model DIR` | 模型根目录 |
-| `--prompt TEXT` | 提示词；缺省时从标准输入读取一行 |
+| `--prompt TEXT` | 交互会话的首条提示词 |
 | `--system TEXT` | System 消息 |
 | `--max-new-tokens N` | 最大生成 Token 数 |
 | `--threads N` | ONNX Runtime CPU intra-op 线程数 |
@@ -284,7 +294,7 @@ cmake -S . -B build \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_ORT_GENAI_EXAMPLE=ON
 
-cmake --build build -j
+cmake --build build -j$(nproc)
 ```
 
 GenAI 默认取自 `third-party/onnxruntime-genai/build/Linux/Release`，
@@ -292,11 +302,19 @@ GenAI 默认取自 `third-party/onnxruntime-genai/build/Linux/Release`，
 
 ### 8.3 运行
 
+程序始终以交互模式运行。不指定 `--prompt` 时直接显示输入提示符：
+
+```bash
+./build/qwen3_infer
+```
+
+指定首条提示词：
+
 ```bash
 ./build/qwen3_infer \
   --prompt "用三句话介绍一下北京" \
   --no-think \
-  --max-new-tokens 128
+  --max-new-tokens 256
 ```
 
 指定其他模型目录：
@@ -317,10 +335,10 @@ GenAI 默认取自 `third-party/onnxruntime-genai/build/Linux/Release`，
   --temperature 0.6 \
   --top-k 20 \
   --top-p 0.95 \
-  --max-new-tokens 128
+  --max-new-tokens 512
 ```
 
-Qwen3-0.6B 默认启用思考模式，`--no-think` 关闭；`--raw-prompt` 绕过 Chat Template 直接续写文本。
+Qwen3-0.6B 默认启用思考模式；`--no-think` 用于关闭思考模式，`--raw-prompt` 用于绕过 Chat Template。
 
 ---
 
