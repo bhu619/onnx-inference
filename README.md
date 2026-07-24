@@ -43,13 +43,13 @@ Transformers，通过 ONNX Runtime C++ API 完成分词、Chat Template、图执
 ### 图片推理
 
 <p align="center">
-  <img src="assets/demos/qwen3_5-image-inference.gif" alt="Qwen3.5-0.8B 图片推理演示" width="1200">
+  <img src="assets/demos/qwen3_5-image-inference.gif" alt="Qwen3.5-0.8B 图片推理演示" width="600">
 </p>
 
 ### 纯文本推理
 
 <p align="center">
-  <img src="assets/demos/qwen3_5-text-inference.gif" alt="Qwen3.5-0.8B 纯文本推理演示" width="1200">
+  <img src="assets/demos/qwen3_5-text-inference.gif" alt="Qwen3.5-0.8B 纯文本推理演示" width="600">
 </p>
 
 ---
