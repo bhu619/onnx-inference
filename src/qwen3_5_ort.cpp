@@ -8,7 +8,9 @@
 #include <cstdlib>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <numeric>
+#include <optional>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -17,6 +19,7 @@
 
 #include "onnxruntime_cxx_api.h"
 #include "qwen3_5_ort.h"
+#include "qwen_image_processor.h"
 #include "qwen_tokenizer.h"
 #include "terminal_ui.h"
 
@@ -25,11 +28,14 @@ namespace fs = std::filesystem;
 // Special token ids and vocabulary size of Qwen3.5-0.8B; must match the model.
 constexpr int64_t kEos = 248044;
 constexpr int64_t kImEnd = 248046;
+constexpr int64_t kImagePad = 248056;
 constexpr size_t kVocabSize = 248320;
+constexpr size_t kHiddenSize = 1024;
 
 // Command-line options; see Usage() for the accepted flags and defaults.
 struct Options {
   fs::path model;
+  fs::path image;
   std::string prompt;
   std::string system = "You are a helpful assistant.";
   int max_new_tokens = 128;
@@ -47,6 +53,7 @@ struct Options {
   if (!error.empty()) std::cerr << "Error: " << error << "\n\n";
   std::cerr << "Usage: " << exe << " --prompt TEXT [options]\n\n"
             << "  --model DIR              Model root (default: ~/.cache/models/Qwen3.5-0.8B-ONNX-OPT)\n"
+            << "  --image FILE             Image to include with each prompt\n"
             << "  --prompt TEXT            Initial prompt for the interactive session\n"
             << "  --system TEXT            System message\n"
             << "  --max-new-tokens N       Generation limit (default: 128)\n"
@@ -73,6 +80,7 @@ Options ParseArgs(int argc, char** argv) {
     std::string a = argv[i];
     if (a == "-h" || a == "--help") Usage(argv[0]);
     else if (a == "--model") o.model = Next(i, argc, argv);
+    else if (a == "--image") o.image = Next(i, argc, argv);
     else if (a == "--prompt") o.prompt = Next(i, argc, argv);
     else if (a == "--system") o.system = Next(i, argc, argv);
     else if (a == "--max-new-tokens") o.max_new_tokens = std::stoi(Next(i, argc, argv));
@@ -96,9 +104,15 @@ Options ParseArgs(int argc, char** argv) {
 
 // Builds the chat prompt manually: system and user turns, then an assistant
 // opener. An immediately closed <think> block disables thinking mode.
-std::string ChatPrompt(const Options& o) {
+std::string ChatPrompt(const Options& o, int64_t image_tokens) {
   std::string prompt = "<|im_start|>system\n" + o.system + "<|im_end|>\n";
-  prompt += "<|im_start|>user\n" + o.prompt + "<|im_end|>\n";
+  prompt += "<|im_start|>user\n";
+  if (image_tokens > 0) {
+    prompt += "<|vision_start|>";
+    for (int64_t i = 0; i < image_tokens; ++i) prompt += "<|image_pad|>";
+    prompt += "<|vision_end|>";
+  }
+  prompt += o.prompt + "<|im_end|>\n";
   prompt += "<|im_start|>assistant\n";
   prompt += o.think ? "<think>\n" : "<think>\n\n</think>\n\n";
   return prompt;
@@ -162,24 +176,152 @@ int64_t SelectToken(float* logits, const Options& o, const std::unordered_set<in
   return ids[std::discrete_distribution<size_t>(probabilities.begin(), probabilities.end())(random)];
 }
 
+struct VisionContext {
+  int64_t grid_t;
+  int64_t grid_h;
+  int64_t grid_w;
+  std::vector<float> features;
+
+  int64_t NumFeatures() const {
+    return grid_t * (grid_h / 2) * (grid_w / 2);
+  }
+};
+
+VisionContext EncodeImage(Ort::Session& vision, const fs::path& image_path) {
+  QwenProcessedImage image = ProcessQwenImage(image_path);
+  Ort::MemoryInfo cpu =
+      Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  std::vector<int64_t> pixel_shape{image.NumPatches(), 1536};
+  std::vector<int64_t> grid_shape{1, 3};
+  std::vector<int64_t> grid{image.grid_t, image.grid_h, image.grid_w};
+  std::vector<Ort::Value> inputs;
+  inputs.push_back(Ort::Value::CreateTensor<float>(
+      cpu, image.pixel_values.data(), image.pixel_values.size(),
+      pixel_shape.data(), pixel_shape.size()));
+  inputs.push_back(Ort::Value::CreateTensor<int64_t>(
+      cpu, grid.data(), grid.size(), grid_shape.data(), grid_shape.size()));
+  auto input_names = Names(vision, true);
+  auto output_names = Names(vision, false);
+  auto input_ptrs = Pointers(input_names);
+  auto output_ptrs = Pointers(output_names);
+  auto outputs = vision.Run(Ort::RunOptions{nullptr}, input_ptrs.data(),
+                            inputs.data(), inputs.size(), output_ptrs.data(),
+                            output_ptrs.size());
+  if (outputs.size() != 1) {
+    throw std::runtime_error("vision encoder returned an unexpected output count");
+  }
+  const size_t expected =
+      static_cast<size_t>(image.NumFeatures()) * kHiddenSize;
+  const size_t actual =
+      outputs[0].GetTensorTypeAndShapeInfo().GetElementCount();
+  if (actual != expected) {
+    throw std::runtime_error("vision encoder returned an unexpected feature shape");
+  }
+  const float* data = outputs[0].GetTensorData<float>();
+  return {image.grid_t, image.grid_h, image.grid_w,
+          std::vector<float>(data, data + actual)};
+}
+
+struct PositionLayout {
+  std::vector<int64_t> values;
+  int64_t next_position;
+};
+
+PositionLayout BuildPositionIds(const std::vector<int64_t>& ids,
+                                const std::optional<VisionContext>& vision) {
+  const size_t sequence = ids.size();
+  PositionLayout layout{{}, static_cast<int64_t>(sequence)};
+  layout.values.resize(3 * sequence);
+  auto set_position = [&](size_t index, int64_t temporal, int64_t height,
+                          int64_t width) {
+    layout.values[index] = temporal;
+    layout.values[sequence + index] = height;
+    layout.values[2 * sequence + index] = width;
+  };
+
+  if (!vision) {
+    for (size_t i = 0; i < sequence; ++i) {
+      const int64_t position = static_cast<int64_t>(i);
+      set_position(i, position, position, position);
+    }
+    return layout;
+  }
+
+  const auto first_pad = std::find(ids.begin(), ids.end(), kImagePad);
+  if (first_pad == ids.end()) {
+    throw std::runtime_error("image prompt does not contain image placeholder tokens");
+  }
+  const size_t pad_begin =
+      static_cast<size_t>(std::distance(ids.begin(), first_pad));
+  const size_t feature_count = static_cast<size_t>(vision->NumFeatures());
+  const size_t pad_end = pad_begin + feature_count;
+  if (pad_end > sequence ||
+      !std::all_of(ids.begin() + static_cast<std::ptrdiff_t>(pad_begin),
+                   ids.begin() + static_cast<std::ptrdiff_t>(pad_end),
+                   [](int64_t id) { return id == kImagePad; }) ||
+      (pad_end < sequence && ids[pad_end] == kImagePad)) {
+    throw std::runtime_error("image placeholder count does not match vision features");
+  }
+
+  for (size_t i = 0; i < pad_begin; ++i) {
+    const int64_t position = static_cast<int64_t>(i);
+    set_position(i, position, position, position);
+  }
+
+  const int64_t merged_h = vision->grid_h / 2;
+  const int64_t merged_w = vision->grid_w / 2;
+  for (size_t i = 0; i < feature_count; ++i) {
+    const int64_t index = static_cast<int64_t>(i);
+    const int64_t temporal = index / (merged_h * merged_w);
+    const int64_t spatial = index % (merged_h * merged_w);
+    set_position(pad_begin + i, static_cast<int64_t>(pad_begin) + temporal,
+                 static_cast<int64_t>(pad_begin) + spatial / merged_w,
+                 static_cast<int64_t>(pad_begin) + spatial % merged_w);
+  }
+
+  const int64_t vision_span =
+      std::max({vision->grid_t, merged_h, merged_w});
+  const int64_t text_start = static_cast<int64_t>(pad_begin) + vision_span;
+  for (size_t i = pad_end; i < sequence; ++i) {
+    const int64_t position =
+        text_start + static_cast<int64_t>(i - pad_end);
+    set_position(i, position, position, position);
+  }
+  layout.next_position =
+      text_start + static_cast<int64_t>(sequence - pad_end);
+  return layout;
+}
+
 int run_qwen3_5_ort(int argc, char** argv) {
   try {
     const Options options = ParseArgs(argc, argv);
     terminal_ui::InstallInterruptHandler();
     const fs::path embed_path = options.model / "onnx/embed_tokens_q4.onnx";
     const fs::path decoder_path = options.model / "onnx/decoder_model_merged_q4.onnx";
+    const fs::path vision_path = options.model / "onnx/vision_encoder_q4.onnx";
     for (const auto& path : {embed_path, decoder_path, options.model / "tokenizer.json"})
       if (!fs::is_regular_file(path)) throw std::runtime_error("missing file: " + path.string());
+    if (!options.image.empty() && !fs::is_regular_file(vision_path)) {
+      throw std::runtime_error("missing file: " + vision_path.string());
+    }
 
-    // Load the tokenizer and both ONNX graphs (embedding + merged decoder).
+    // Load the tokenizer and ONNX graphs. The vision graph is optional.
     terminal_ui::PrintLoadingMessage();
     QwenTokenizer tokenizer((options.model / "tokenizer.json").string());
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "qwen3_5-ort");
     Ort::SessionOptions session_options;
     session_options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
+    session_options.SetLogSeverityLevel(3);
     if (options.intra_threads > 0) session_options.SetIntraOpNumThreads(options.intra_threads);
     Ort::Session embed(env, embed_path.c_str(), session_options);
     Ort::Session decoder(env, decoder_path.c_str(), session_options);
+    std::unique_ptr<Ort::Session> vision;
+    std::optional<VisionContext> vision_context;
+    if (!options.image.empty()) {
+      vision =
+          std::make_unique<Ort::Session>(env, vision_path.c_str(), session_options);
+      vision_context = EncodeImage(*vision, options.image);
+    }
     auto embed_inputs = Names(embed, true), embed_outputs = Names(embed, false);
     auto decoder_inputs = Names(decoder, true), decoder_outputs = Names(decoder, false);
     auto embed_input_ptrs = Pointers(embed_inputs), embed_output_ptrs = Pointers(embed_outputs);
@@ -190,9 +332,15 @@ int run_qwen3_5_ort(int argc, char** argv) {
     while (true) {
       if (!terminal_ui::ReadPrompt(request.prompt)) break;
 
-      std::vector<int64_t> current_ids = tokenizer.Encode(ChatPrompt(request));
+      const int64_t image_tokens =
+          vision_context ? vision_context->NumFeatures() : 0;
+      std::vector<int64_t> current_ids =
+          tokenizer.Encode(ChatPrompt(request, image_tokens));
       const size_t prompt_tokens = current_ids.size();
       if (current_ids.empty()) throw std::runtime_error("tokenizer returned an empty prompt");
+      const PositionLayout prompt_positions =
+          BuildPositionIds(current_ids, vision_context);
+      int64_t next_position = prompt_positions.next_position;
       terminal_ui::TerminalOutput output(request.think);
 
       Ort::AllocatorWithDefaultOptions allocator;
@@ -225,14 +373,36 @@ int run_qwen3_5_ort(int argc, char** argv) {
                                                             ids_shape.data(), ids_shape.size());
         auto embedded = embed.Run(Ort::RunOptions{nullptr}, embed_input_ptrs.data(), &ids_tensor, 1,
                                   embed_output_ptrs.data(), 1);
+        if (past_length == 0 && vision_context) {
+          float* embeddings = embedded[0].GetTensorMutableData<float>();
+          size_t feature = 0;
+          for (size_t i = 0; i < current_ids.size(); ++i) {
+            if (current_ids[i] != kImagePad) continue;
+            std::copy_n(vision_context->features.data() + feature * kHiddenSize,
+                        kHiddenSize, embeddings + i * kHiddenSize);
+            ++feature;
+          }
+          if (feature != static_cast<size_t>(vision_context->NumFeatures())) {
+            throw std::runtime_error(
+                "failed to place all image features in prompt embeddings");
+          }
+        }
 
         const int64_t sequence = static_cast<int64_t>(current_ids.size());
         std::vector<int64_t> mask(static_cast<size_t>(past_length + sequence), 1);
-        // MRoPE position_ids with shape [3, 1, seq]; for text, all three axes
-        // carry the same ascending positions.
-        std::vector<int64_t> positions(static_cast<size_t>(3 * sequence));
-        for (int axis = 0; axis < 3; ++axis)
-          for (int64_t i = 0; i < sequence; ++i) positions[static_cast<size_t>(axis * sequence + i)] = past_length + i;
+        std::vector<int64_t> positions;
+        if (past_length == 0) {
+          positions = prompt_positions.values;
+        } else {
+          positions.resize(static_cast<size_t>(3 * sequence));
+          for (int axis = 0; axis < 3; ++axis) {
+            for (int64_t i = 0; i < sequence; ++i) {
+              positions[static_cast<size_t>(axis * sequence + i)] =
+                  next_position + i;
+            }
+          }
+          next_position += sequence;
+        }
         int64_t keep_logits = 1;
         std::vector<int64_t> mask_shape{1, past_length + sequence};
         std::vector<int64_t> position_shape{3, 1, sequence};
