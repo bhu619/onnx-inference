@@ -70,31 +70,37 @@ ONNX Runtime 与 ONNX Runtime GenAI 以 Git 子模块形式引入 `third-party/`
 
 ---
 
-## 5. 初始化依赖
-
-克隆时使用 `--recurse-submodules` 一次性拉取全部子模块：
+## 5. 获取源码
 
 ```bash
-git clone --recurse-submodules https://github.com/bhu619/onnx-inference.git
+git clone https://github.com/bhu619/onnx-inference.git
 cd onnx-inference
 ```
 
-普通克隆的仓库可通过以下两种等效方式初始化子模块：将子模块检出到主仓库记录的提交，
-并递归初始化 ONNX Runtime 的嵌套子模块，不切换到远端分支的最新提交。
+---
 
-### 5.1 使用初始化脚本（推荐）
+## 6. 初始化依赖
+
+项目依赖通过 Git 子模块管理。选择以下任一方式完成初始化。
+
+### 6.1 使用初始化脚本（推荐）
+
+脚本会先同步 `.gitmodules` 中配置的子模块地址，再初始化所选子模块及其嵌套子模块。首次使用建议初始化全部依赖；主仓库更新子模块版本后，重新执行相同命令即可。
 
 ```bash
-./scripts/init_submodules.sh --all              # 初始化全部子模块
-./scripts/init_submodules.sh -s onnxruntime     # 仅初始化指定子模块
-./scripts/init_submodules.sh --all --dry-run    # 仅打印将执行的命令，不执行
+./scripts/init_submodules.sh --help                         # 查看完整参数说明
+
+./scripts/init_submodules.sh --all                          # 初始化全部依赖
+./scripts/init_submodules.sh --all --dry-run                # 预览将执行的 Git 命令
+
+./scripts/init_submodules.sh -s onnxruntime                 # 仅初始化 ONNX Runtime
+./scripts/init_submodules.sh -s onnxruntime-genai           # 仅初始化 ONNX Runtime GenAI
+./scripts/init_submodules.sh -s onnxruntime,onnxruntime-genai  # 初始化多个指定子模块
 ```
 
-支持 `--submodule / -s` 选择子模块（可重复使用或逗号分隔），`--all` 全量初始化，
-`--dry-run` 预览命令；无参数时显示帮助。完整用法见 `--help`。
-脚本先同步 `.gitmodules` 中的 URL，再执行递归初始化；主仓库更新子模块版本后重新运行即可。
+`--submodule`（或 `-s`）可重复使用，也可传入逗号分隔的多个名称；不带参数运行脚本时同样会显示帮助。
 
-### 5.2 使用 Git 命令
+### 6.2 使用 Git 命令
 
 ```bash
 git submodule sync --recursive
@@ -115,9 +121,9 @@ git submodule status
 
 ---
 
-## 6. 快速开始：Qwen3.5-0.8B（`qwen3_5_ort`）
+## 7. 快速开始：Qwen3.5-0.8B（`qwen3_5_ort`）
 
-### 6.1 准备模型文件
+### 7.1 准备模型文件
 
 模型托管于 Hugging Face：
 [onnx-community/Qwen3.5-0.8B-ONNX-OPT](https://huggingface.co/onnx-community/Qwen3.5-0.8B-ONNX-OPT/tree/main)。
@@ -135,7 +141,7 @@ hf download onnx-community/Qwen3.5-0.8B-ONNX-OPT \
   --include "preprocessor_config.json" \
   --include "processor_config.json" \
   --include "onnx/vision_encoder_q4.onnx*" \
-  --local-dir .
+  --local-dir "$HOME/.cache/models/Qwen3.5-0.8B-ONNX-OPT"
 ```
 
 推理必需的文件如下（其余为可选配置与多模态文件）：
@@ -152,15 +158,14 @@ Qwen3.5-0.8B-ONNX-OPT/
 
 `.onnx` 保存计算图，`.onnx_data` 保存模型权重，二者必须位于同一目录。
 
-默认模型路径为 `/home/ubuntu/.cache/models/Qwen3.5-0.8B-ONNX-OPT`，其他路径通过 `--model` 指定。
+示例默认从 `~/.cache/models/Qwen3.5-0.8B-ONNX-OPT` 加载模型。模型存放在其他位置时，通过 `--model` 指定模型根目录。
 
-### 6.2 编译
+### 7.2 编译
 
-首先编译 `third-party/onnxruntime` 子模块（一次性），生成共享库 `libonnxruntime.so`；
-编译方法见官方文档
-[Build ONNX Runtime for inferencing](https://onnxruntime.ai/docs/build/inferencing.html)。
+`qwen3_5_ort` 依赖 ONNX Runtime 共享库。请按照 ONNX Runtime 官方
+[Build ONNX Runtime for inferencing](https://onnxruntime.ai/docs/build/inferencing.html)，在 `third-party/onnxruntime` 子模块中完成构建。
 
-然后编译示例程序：
+完成 ONNX Runtime 构建后，在仓库根目录配置并构建示例程序：
 
 ```bash
 cmake -S . -B build \
@@ -169,11 +174,18 @@ cmake -S . -B build \
 cmake --build build -j
 ```
 
-产物为 `build/qwen3_5_ort`。CMake 已写入 ONNX Runtime 的 RUNPATH，无需设置 `LD_LIBRARY_PATH`。
-ONNX Runtime 默认取自 `third-party/onnxruntime/build/Linux/RelWithDebInfo`，
-可通过 `-DONNXRUNTIME_ROOT=... -DONNXRUNTIME_BUILD=...` 指向外部构建。
+构建产物为 `build/qwen3_5_ort`。默认配置使用子模块目录 `third-party/onnxruntime` 及其 `build/Linux/RelWithDebInfo` 构建输出；CMake 会写入运行时库搜索路径，因此运行时无需设置 `LD_LIBRARY_PATH`。
 
-### 6.3 运行
+若 ONNX Runtime 位于其他位置，在配置时同时指定源码目录和包含 `libonnxruntime.so` 的构建目录：
+
+```bash
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DONNXRUNTIME_ROOT=/path/to/onnxruntime \
+  -DONNXRUNTIME_BUILD=/path/to/onnxruntime-build
+```
+
+### 7.3 运行
 
 基本推理（默认非思考模式）：
 
@@ -208,7 +220,7 @@ ONNX Runtime 默认取自 `third-party/onnxruntime/build/Linux/RelWithDebInfo`�
   --threads 4
 ```
 
-### 6.4 命令行参数
+### 7.4 命令行参数
 
 | 参数 | 说明 |
 | --- | --- |
@@ -228,11 +240,11 @@ ONNX Runtime 默认取自 `third-party/onnxruntime/build/Linux/RelWithDebInfo`�
 
 ---
 
-## 7. 可选示例：Qwen3-0.6B（`qwen3_infer`）
+## 8. 可选示例：Qwen3-0.6B（`qwen3_infer`）
 
 `qwen3_infer` 基于 ONNX Runtime GenAI，与 `qwen3_5_ort` 相互独立，默认不参与构建。
 
-### 7.1 下载模型
+### 8.1 下载模型
 
 使用 Hugging Face 上已转换的
 [`xiaoyao9184/Qwen3-0.6B-onnx-genai`](https://huggingface.co/xiaoyao9184/Qwen3-0.6B-onnx-genai)，
@@ -241,13 +253,13 @@ ONNX Runtime 默认取自 `third-party/onnxruntime/build/Linux/RelWithDebInfo`�
 ```bash
 hf download xiaoyao9184/Qwen3-0.6B-onnx-genai \
   --include "cpu_and_mobile/cpu-int4-rtn-block-32/*" \
-  --local-dir /home/ubuntu/.cache/models/Qwen3-0.6B-onnx-genai
+  --local-dir "$HOME/.cache/models/Qwen3-0.6B-onnx-genai"
 ```
 
 下载后的目录结构：
 
 ```text
-/home/ubuntu/.cache/models/Qwen3-0.6B-onnx-genai/
+~/.cache/models/Qwen3-0.6B-onnx-genai/
 └── cpu_and_mobile/
     └── cpu-int4-rtn-block-32/
         ├── chat_template.jinja
@@ -258,16 +270,14 @@ hf download xiaoyao9184/Qwen3-0.6B-onnx-genai \
         └── tokenizer_config.json
 ```
 
-`qwen3_infer` 默认使用上述 CPU INT4 子目录；其他设备版本需通过 `--model`
-指向直接包含 `genai_config.json` 的子目录。
+`qwen3_infer` 默认使用上述 CPU INT4 子目录。模型存放在其他位置或使用其他设备版本时，通过 `--model` 指向直接包含 `genai_config.json` 的子目录。
 
-### 7.2 编译
+### 8.2 编译
 
-首先编译 `third-party/onnxruntime-genai` 子模块（一次性），它会按固定依赖构建配套的
-ONNX Runtime；编译方法见官方文档
-[Build ONNX Runtime GenAI from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html)。
+`qwen3_infer` 依赖 ONNX Runtime GenAI 及其配套 ONNX Runtime。请按照 ONNX Runtime GenAI 官方
+[Build the generate() API from source](https://onnxruntime.ai/docs/genai/howto/build-from-source.html)，在 `third-party/onnxruntime-genai` 子模块中完成构建。
 
-然后启用 `BUILD_ORT_GENAI_EXAMPLE` 编译示例程序：
+完成 ONNX Runtime GenAI 构建后，启用 `BUILD_ORT_GENAI_EXAMPLE` 配置并构建示例程序：
 
 ```bash
 cmake -S . -B build \
@@ -280,7 +290,7 @@ cmake --build build -j
 GenAI 默认取自 `third-party/onnxruntime-genai/build/Linux/Release`，
 可通过 `-DORT_GENAI_ROOT=... -DORT_GENAI_BUILD=...` 指向外部构建。
 
-### 7.3 运行
+### 8.3 运行
 
 ```bash
 ./build/qwen3_infer \
@@ -314,7 +324,7 @@ Qwen3-0.6B 默认启用思考模式，`--no-think` 关闭；`--raw-prompt` 绕�
 
 ---
 
-## 8. 工具：检查 ONNX 模型结构
+## 9. 工具：检查 ONNX 模型结构
 
 `inspect_onnx` 打印 ONNX 图的输入/输出名称、类型与维度，用于核对模型接口：
 

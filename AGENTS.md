@@ -55,7 +55,7 @@ cmake --build build -j
    ./build/qwen3_5_ort --prompt "用三句话介绍一下北京" --max-new-tokens 32 --threads 4
    ```
 
-   默认模型路径 `/home/ubuntu/.cache/models/Qwen3.5-0.8B-ONNX-OPT`，否则加 `--model`。
+   默认模型路径 `~/.cache/models/Qwen3.5-0.8B-ONNX-OPT`，否则加 `--model`。
 3. 涉及 ONNX 图接口（输入输出名称、维度、state 数量）的改动，用
    `./build/inspect_onnx <model.onnx>` 核对。
 
