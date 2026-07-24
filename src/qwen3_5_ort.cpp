@@ -6,9 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
-#include <cstring>
 #include <filesystem>
-#include <iomanip>
 #include <iostream>
 #include <numeric>
 #include <random>
@@ -20,6 +18,7 @@
 #include "onnxruntime_cxx_api.h"
 #include "qwen3_5_ort.h"
 #include "qwen_tokenizer.h"
+#include "terminal_ui.h"
 
 namespace fs = std::filesystem;
 
@@ -27,14 +26,6 @@ namespace fs = std::filesystem;
 constexpr int64_t kEos = 248044;
 constexpr int64_t kImEnd = 248046;
 constexpr size_t kVocabSize = 248320;
-
-fs::path DefaultModelPath() {
-  const char* home = std::getenv("HOME");
-  if (home == nullptr || *home == '\0') {
-    throw std::runtime_error("HOME is not set; specify the model directory with --model");
-  }
-  return fs::path(home) / ".cache/models/Qwen3.5-0.8B-ONNX-OPT";
-}
 
 // Command-line options; see Usage() for the accepted flags and defaults.
 struct Options {
@@ -56,7 +47,7 @@ struct Options {
   if (!error.empty()) std::cerr << "Error: " << error << "\n\n";
   std::cerr << "Usage: " << exe << " --prompt TEXT [options]\n\n"
             << "  --model DIR              Model root (default: ~/.cache/models/Qwen3.5-0.8B-ONNX-OPT)\n"
-            << "  --prompt TEXT            User prompt; reads one stdin line if omitted\n"
+            << "  --prompt TEXT            Initial prompt for the interactive session\n"
             << "  --system TEXT            System message\n"
             << "  --max-new-tokens N       Generation limit (default: 128)\n"
             << "  --threads N              ORT intra-op threads (default: ORT chooses)\n"
@@ -95,9 +86,9 @@ Options ParseArgs(int argc, char** argv) {
     else if (a == "--think") o.think = true;
     else Usage(argv[0], "unknown option: " + a);
   }
-  if (o.prompt.empty()) std::getline(std::cin, o.prompt);
-  if (o.prompt.empty()) Usage(argv[0], "prompt must not be empty");
-  if (o.model.empty()) o.model = DefaultModelPath();
+  if (o.model.empty()) {
+    o.model = terminal_ui::ModelCachePath("Qwen3.5-0.8B-ONNX-OPT");
+  }
   if (o.max_new_tokens <= 0 || o.top_k <= 0 || o.temperature <= 0 || o.top_p <= 0 || o.top_p > 1)
     Usage(argv[0], "invalid generation option");
   return o;
@@ -174,13 +165,14 @@ int64_t SelectToken(float* logits, const Options& o, const std::unordered_set<in
 int run_qwen3_5_ort(int argc, char** argv) {
   try {
     const Options options = ParseArgs(argc, argv);
+    terminal_ui::InstallInterruptHandler();
     const fs::path embed_path = options.model / "onnx/embed_tokens_q4.onnx";
     const fs::path decoder_path = options.model / "onnx/decoder_model_merged_q4.onnx";
     for (const auto& path : {embed_path, decoder_path, options.model / "tokenizer.json"})
       if (!fs::is_regular_file(path)) throw std::runtime_error("missing file: " + path.string());
 
     // Load the tokenizer and both ONNX graphs (embedding + merged decoder).
-    std::cerr << "Loading tokenizer and ONNX sessions...\n";
+    terminal_ui::PrintLoadingMessage();
     QwenTokenizer tokenizer((options.model / "tokenizer.json").string());
     Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "qwen3_5-ort");
     Ort::SessionOptions session_options;
@@ -192,82 +184,96 @@ int run_qwen3_5_ort(int argc, char** argv) {
     auto decoder_inputs = Names(decoder, true), decoder_outputs = Names(decoder, false);
     auto embed_input_ptrs = Pointers(embed_inputs), embed_output_ptrs = Pointers(embed_outputs);
     auto decoder_input_ptrs = Pointers(decoder_inputs), decoder_output_ptrs = Pointers(decoder_outputs);
+    terminal_ui::PrintChatHeader(options.model);
 
-    std::vector<int64_t> current_ids = tokenizer.Encode(ChatPrompt(options));
-    const size_t prompt_tokens = current_ids.size();
-    if (current_ids.empty()) throw std::runtime_error("tokenizer returned an empty prompt");
-    std::cerr << "Prompt tokens: " << prompt_tokens << "\nOutput: " << std::flush;
+    Options request = options;
+    while (true) {
+      if (!terminal_ui::ReadPrompt(request.prompt)) break;
 
-    Ort::AllocatorWithDefaultOptions allocator;
-    Ort::MemoryInfo cpu = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
-    // Initial decoder states, aligned with the graph inputs that follow
-    // inputs_embeds / attention_mask / position_ids / keep_logits:
-    //   past_conv.*      -> {1, 6144, 3}      (short conv state)
-    //   past_recurrent.* -> {1, 16, 128, 128} (recurrent state)
-    //   remaining        -> {1, 2, 0, 256}    (empty KV cache)
-    std::vector<Ort::Value> states;
-    for (size_t i = 4; i < decoder_inputs.size(); ++i) {
-      const std::string& name = decoder_inputs[i];
-      if (name.rfind("past_conv.", 0) == 0) states.push_back(ZeroTensor(allocator, {1, 6144, 3}));
-      else if (name.rfind("past_recurrent.", 0) == 0) states.push_back(ZeroTensor(allocator, {1, 16, 128, 128}));
-      else states.push_back(ZeroTensor(allocator, {1, 2, 0, 256}));
+      std::vector<int64_t> current_ids = tokenizer.Encode(ChatPrompt(request));
+      const size_t prompt_tokens = current_ids.size();
+      if (current_ids.empty()) throw std::runtime_error("tokenizer returned an empty prompt");
+      terminal_ui::TerminalOutput output(request.think);
+
+      Ort::AllocatorWithDefaultOptions allocator;
+      Ort::MemoryInfo cpu = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+      // Initial decoder states, aligned with the graph inputs that follow
+      // inputs_embeds / attention_mask / position_ids / keep_logits:
+      //   past_conv.*      -> {1, 6144, 3}      (short conv state)
+      //   past_recurrent.* -> {1, 16, 128, 128} (recurrent state)
+      //   remaining        -> {1, 2, 0, 256}    (empty KV cache)
+      std::vector<Ort::Value> states;
+      for (size_t i = 4; i < decoder_inputs.size(); ++i) {
+        const std::string& name = decoder_inputs[i];
+        if (name.rfind("past_conv.", 0) == 0) states.push_back(ZeroTensor(allocator, {1, 6144, 3}));
+        else if (name.rfind("past_recurrent.", 0) == 0) states.push_back(ZeroTensor(allocator, {1, 16, 128, 128}));
+        else states.push_back(ZeroTensor(allocator, {1, 2, 0, 256}));
+      }
+
+      int64_t past_length = 0;
+      std::unordered_set<int64_t> seen;
+      std::mt19937 random(request.seed);
+      const auto started = std::chrono::steady_clock::now();
+      auto first_token_time = started;
+      size_t generated = 0;
+      terminal_ui::GenerationGuard generation;
+      // Prefill the full prompt, then decode one token per iteration.
+      for (; generated < static_cast<size_t>(request.max_new_tokens) &&
+             !generation.Interrupted(); ++generated) {
+        std::vector<int64_t> ids_shape{1, static_cast<int64_t>(current_ids.size())};
+        auto ids_tensor = Ort::Value::CreateTensor<int64_t>(cpu, current_ids.data(), current_ids.size(),
+                                                            ids_shape.data(), ids_shape.size());
+        auto embedded = embed.Run(Ort::RunOptions{nullptr}, embed_input_ptrs.data(), &ids_tensor, 1,
+                                  embed_output_ptrs.data(), 1);
+
+        const int64_t sequence = static_cast<int64_t>(current_ids.size());
+        std::vector<int64_t> mask(static_cast<size_t>(past_length + sequence), 1);
+        // MRoPE position_ids with shape [3, 1, seq]; for text, all three axes
+        // carry the same ascending positions.
+        std::vector<int64_t> positions(static_cast<size_t>(3 * sequence));
+        for (int axis = 0; axis < 3; ++axis)
+          for (int64_t i = 0; i < sequence; ++i) positions[static_cast<size_t>(axis * sequence + i)] = past_length + i;
+        int64_t keep_logits = 1;
+        std::vector<int64_t> mask_shape{1, past_length + sequence};
+        std::vector<int64_t> position_shape{3, 1, sequence};
+        std::vector<int64_t> scalar_shape;
+
+        std::vector<Ort::Value> inputs;
+        inputs.reserve(decoder_inputs.size());
+        inputs.push_back(std::move(embedded[0]));
+        inputs.push_back(Ort::Value::CreateTensor<int64_t>(cpu, mask.data(), mask.size(), mask_shape.data(), mask_shape.size()));
+        inputs.push_back(Ort::Value::CreateTensor<int64_t>(cpu, positions.data(), positions.size(), position_shape.data(), position_shape.size()));
+        inputs.push_back(Ort::Value::CreateTensor<int64_t>(cpu, &keep_logits, 1, scalar_shape.data(), 0));
+        for (auto& state : states) inputs.push_back(std::move(state));
+
+        auto outputs = decoder.Run(Ort::RunOptions{nullptr}, decoder_input_ptrs.data(), inputs.data(), inputs.size(),
+                                   decoder_output_ptrs.data(), decoder_output_ptrs.size());
+        past_length += sequence;
+        // Outputs after the logits become the next step's recurrent/KV states.
+        states.clear();
+        states.reserve(outputs.size() - 1);
+        for (size_t i = 1; i < outputs.size(); ++i) states.push_back(std::move(outputs[i]));
+
+        int64_t token = SelectToken(outputs[0].GetTensorMutableData<float>(), request, seen, random);
+        if (generated == 0) first_token_time = std::chrono::steady_clock::now();
+        if (token == kEos || token == kImEnd) break;
+        seen.insert(token);
+        output.Write(tokenizer.DecodeToken(token));
+        current_ids.assign(1, token);
+      }
+      generation.Finish();
+      const auto finished = std::chrono::steady_clock::now();
+      const double prompt_seconds =
+          std::chrono::duration<double>(first_token_time - started).count();
+      const double generation_seconds =
+          std::chrono::duration<double>(finished - first_token_time).count();
+      output.Finish();
+      terminal_ui::PrintStats(
+          prompt_tokens, generated, prompt_seconds,
+          prompt_seconds > 0 ? prompt_tokens / prompt_seconds : 0.0,
+          generation_seconds > 0 ? generated / generation_seconds : 0.0);
+      request.prompt.clear();
     }
-
-    int64_t past_length = 0;
-    std::unordered_set<int64_t> seen;
-    std::mt19937 random(options.seed);
-    const auto started = std::chrono::steady_clock::now();
-    auto first_token_time = started;
-    size_t generated = 0;
-    // Prefill the full prompt, then decode one token per iteration.
-    for (; generated < static_cast<size_t>(options.max_new_tokens); ++generated) {
-      std::vector<int64_t> ids_shape{1, static_cast<int64_t>(current_ids.size())};
-      auto ids_tensor = Ort::Value::CreateTensor<int64_t>(cpu, current_ids.data(), current_ids.size(),
-                                                          ids_shape.data(), ids_shape.size());
-      auto embedded = embed.Run(Ort::RunOptions{nullptr}, embed_input_ptrs.data(), &ids_tensor, 1,
-                                embed_output_ptrs.data(), 1);
-
-      const int64_t sequence = static_cast<int64_t>(current_ids.size());
-      std::vector<int64_t> mask(static_cast<size_t>(past_length + sequence), 1);
-      // MRoPE position_ids with shape [3, 1, seq]; for text, all three axes
-      // carry the same ascending positions.
-      std::vector<int64_t> positions(static_cast<size_t>(3 * sequence));
-      for (int axis = 0; axis < 3; ++axis)
-        for (int64_t i = 0; i < sequence; ++i) positions[static_cast<size_t>(axis * sequence + i)] = past_length + i;
-      int64_t keep_logits = 1;
-      std::vector<int64_t> mask_shape{1, past_length + sequence};
-      std::vector<int64_t> position_shape{3, 1, sequence};
-      std::vector<int64_t> scalar_shape;
-
-      std::vector<Ort::Value> inputs;
-      inputs.reserve(decoder_inputs.size());
-      inputs.push_back(std::move(embedded[0]));
-      inputs.push_back(Ort::Value::CreateTensor<int64_t>(cpu, mask.data(), mask.size(), mask_shape.data(), mask_shape.size()));
-      inputs.push_back(Ort::Value::CreateTensor<int64_t>(cpu, positions.data(), positions.size(), position_shape.data(), position_shape.size()));
-      inputs.push_back(Ort::Value::CreateTensor<int64_t>(cpu, &keep_logits, 1, scalar_shape.data(), 0));
-      for (auto& state : states) inputs.push_back(std::move(state));
-
-      auto outputs = decoder.Run(Ort::RunOptions{nullptr}, decoder_input_ptrs.data(), inputs.data(), inputs.size(),
-                                 decoder_output_ptrs.data(), decoder_output_ptrs.size());
-      past_length += sequence;
-      // Outputs after the logits become the next step's recurrent/KV states.
-      states.clear();
-      states.reserve(outputs.size() - 1);
-      for (size_t i = 1; i < outputs.size(); ++i) states.push_back(std::move(outputs[i]));
-
-      int64_t token = SelectToken(outputs[0].GetTensorMutableData<float>(), options, seen, random);
-      if (generated == 0) first_token_time = std::chrono::steady_clock::now();
-      if (token == kEos || token == kImEnd) break;
-      seen.insert(token);
-      std::cout << tokenizer.DecodeToken(token) << std::flush;
-      current_ids.assign(1, token);
-    }
-    const auto finished = std::chrono::steady_clock::now();
-    const double elapsed = std::chrono::duration<double>(finished - started).count();
-    const double first = std::chrono::duration<double>(first_token_time - started).count();
-    std::cout << "\n\n[prompt=" << prompt_tokens << " tokens, generated=" << generated
-              << ", first-token=" << std::fixed << std::setprecision(3) << first
-              << "s, throughput=" << (elapsed > 0 ? generated / elapsed : 0) << " token/s]\n";
     return 0;
   } catch (const Ort::Exception& e) {
     std::cerr << "ONNX Runtime error: " << e.what() << '\n';
