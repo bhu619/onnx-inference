@@ -1,7 +1,7 @@
 // Shared entry point for the inference examples. Each executable links
 // exactly one backend: QWEN_BACKEND_GENAI selects the ONNX Runtime GenAI
-// backend (qwen3_infer); otherwise the plain ONNX Runtime backend
-// (qwen3_5_ort) is used.
+// backend (onnx-genai-cli); otherwise the plain ONNX Runtime backend
+// (onnx-cli) is used.
 
 #if defined(QWEN_BACKEND_GENAI)
 #include "qwen3_genai.h"

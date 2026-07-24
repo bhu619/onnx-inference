@@ -4,3 +4,6 @@
 [submodule "third-party/onnxruntime-genai"]
 	path = third-party/onnxruntime-genai
 	url = https://github.com/microsoft/onnxruntime-genai.git
+[submodule "third-party/stb"]
+	path = third-party/stb
+	url = https://github.com/nothings/stb.git

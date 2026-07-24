@@ -3,6 +3,7 @@
 # Initialize the Git submodules under third-party/:
 #   - ONNX Runtime v1.27.1
 #   - ONNX Runtime GenAI v0.14.0
+#   - stb (commit 31c1ad37456438565541f4919958214b6e762fb4)
 #
 # The superproject records a pinned commit for each submodule, so this script
 # does not move them to the latest commit of any remote branch. --recursive
@@ -20,6 +21,7 @@ PROJECT_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 ALL_SUBMODULES=(
   "third-party/onnxruntime"
   "third-party/onnxruntime-genai"
+  "third-party/stb"
 )
 
 usage() {
@@ -32,6 +34,7 @@ When called without arguments, shows this help and exits.
 Submodules:
   onnxruntime          third-party/onnxruntime (ONNX Runtime v1.27.1)
   onnxruntime-genai    third-party/onnxruntime-genai (ONNX Runtime GenAI v0.14.0)
+  stb                  third-party/stb (image decoder, commit 31c1ad3)
 
 Options:
   --all                Initialize all submodules
@@ -45,6 +48,8 @@ Examples:
   $(basename "$0") --submodule onnxruntime
   $(basename "$0") --submodule onnxruntime --submodule onnxruntime-genai
   $(basename "$0") --submodule onnxruntime, onnxruntime-genai
+  $(basename "$0") --submodule stb
+  $(basename "$0") --submodule onnxruntime,stb
   $(basename "$0") --submodule=onnxruntime
   $(basename "$0") -s onnxruntime
   $(basename "$0") -s onnxruntime,onnxruntime-genai
@@ -65,6 +70,8 @@ resolve_submodule() {
       SELECTED+=("third-party/onnxruntime") ;;
     onnxruntime-genai|third-party/onnxruntime-genai)
       SELECTED+=("third-party/onnxruntime-genai") ;;
+    stb|third-party/stb)
+      SELECTED+=("third-party/stb") ;;
     *)
       echo "Error: unknown submodule '$name'." >&2
       usage >&2
@@ -149,7 +156,7 @@ run() {
 if [[ ${DRY_RUN} -eq 0 ]]; then
   echo "Syncing submodule URLs..."
 fi
-run git -C "${PROJECT_ROOT}" submodule sync --recursive -- "${SELECTED[@]}"
+run git -C "${PROJECT_ROOT}" submodule sync --recursive
 
 if [[ ${DRY_RUN} -eq 0 ]]; then
   echo "Initializing submodules: ${SELECTED[*]} ..."

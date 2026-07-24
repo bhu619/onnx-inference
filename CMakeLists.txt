@@ -15,13 +15,23 @@ if(NOT EXISTS "${ONNXRUNTIME_ROOT}/include/onnxruntime/core/session/onnxruntime_
     "Run 'git submodule update --init --recursive' or set ONNXRUNTIME_ROOT.")
 endif()
 find_library(ONNXRUNTIME_LIBRARY onnxruntime PATHS "${ONNXRUNTIME_BUILD}" NO_DEFAULT_PATH REQUIRED)
+if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third-party/stb/stb_image.h")
+  message(FATAL_ERROR
+    "stb_image.h not found at ${CMAKE_SOURCE_DIR}/third-party/stb. "
+    "Run 'git submodule update --init --recursive'.")
+endif()
 
-add_executable(qwen3_5_ort src/main.cpp src/qwen3_5_ort.cpp src/qwen_tokenizer.cpp)
-target_include_directories(qwen3_5_ort PRIVATE
+add_executable(onnx-cli
+  src/main.cpp
+  src/qwen3_5_ort.cpp
+  src/qwen_image_processor.cpp
+  src/qwen_tokenizer.cpp)
+target_include_directories(onnx-cli PRIVATE
   "${CMAKE_SOURCE_DIR}/include"
+  "${CMAKE_SOURCE_DIR}/third-party/stb"
   "${ONNXRUNTIME_ROOT}/include/onnxruntime/core/session")
-target_link_libraries(qwen3_5_ort PRIVATE "${ONNXRUNTIME_LIBRARY}")
-set_target_properties(qwen3_5_ort PROPERTIES
+target_link_libraries(onnx-cli PRIVATE "${ONNXRUNTIME_LIBRARY}")
+set_target_properties(onnx-cli PROPERTIES
   BUILD_RPATH "${ONNXRUNTIME_BUILD}"
   INSTALL_RPATH "${ONNXRUNTIME_BUILD}")
 
@@ -51,15 +61,15 @@ if(BUILD_ORT_GENAI_EXAMPLE)
     endif()
   endforeach()
 
-  add_executable(qwen3_infer src/main.cpp src/qwen3_genai.cpp)
-  target_compile_definitions(qwen3_infer PRIVATE QWEN_BACKEND_GENAI)
-  target_include_directories(qwen3_infer PRIVATE
+  add_executable(onnx-genai-cli src/main.cpp src/qwen3_genai.cpp)
+  target_compile_definitions(onnx-genai-cli PRIVATE QWEN_BACKEND_GENAI)
+  target_include_directories(onnx-genai-cli PRIVATE
     "${CMAKE_SOURCE_DIR}/include"
     "${ORT_GENAI_ROOT}/src")
-  target_link_libraries(qwen3_infer PRIVATE
+  target_link_libraries(onnx-genai-cli PRIVATE
     "${ORT_GENAI_BUILD}/libonnxruntime-genai.so"
     "${ORT_GENAI_BUILD}/libonnxruntime.so")
-  set_target_properties(qwen3_infer PROPERTIES
+  set_target_properties(onnx-genai-cli PROPERTIES
     BUILD_RPATH "${ORT_GENAI_BUILD}"
     INSTALL_RPATH "${ORT_GENAI_BUILD}")
 endif()
