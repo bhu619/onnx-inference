@@ -34,10 +34,15 @@ Transformers，通过 ONNX Runtime C++ API 完成分词、Chat Template、图执
 ## 3. 目录结构
 
 ```text
+├── include/
+│   ├── qwen3_5_ort.h           # Qwen3.5-0.8B 推理接口
+│   ├── qwen3_genai.h           # Qwen3-0.6B 推理接口
+│   └── qwen_tokenizer.h        # Qwen BPE 分词器接口
 ├── src/
-│   ├── qwen3_5_ort.cpp        # Qwen3.5-0.8B 推理主程序（默认示例）
-│   ├── qwen_tokenizer.{h,cpp}  # Qwen BPE 分词器
-│   └── main.cpp               # Qwen3-0.6B 推理程序（ORT GenAI 示例）
+│   ├── main.cpp                # 共享入口（按编译宏分发到推理后端）
+│   ├── qwen3_5_ort.cpp         # Qwen3.5-0.8B 推理（ONNX Runtime C++ API）
+│   ├── qwen3_genai.cpp         # Qwen3-0.6B 推理（ONNX Runtime GenAI）
+│   └── qwen_tokenizer.cpp      # Qwen BPE 分词器
 ├── tools/
 │   └── inspect_onnx.cpp       # ONNX 模型输入输出检查工具
 ├── scripts/

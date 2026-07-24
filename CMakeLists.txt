@@ -16,8 +16,9 @@ if(NOT EXISTS "${ONNXRUNTIME_ROOT}/include/onnxruntime/core/session/onnxruntime_
 endif()
 find_library(ONNXRUNTIME_LIBRARY onnxruntime PATHS "${ONNXRUNTIME_BUILD}" NO_DEFAULT_PATH REQUIRED)
 
-add_executable(qwen3_5_ort src/qwen3_5_ort.cpp src/qwen_tokenizer.cpp)
+add_executable(qwen3_5_ort src/main.cpp src/qwen3_5_ort.cpp src/qwen_tokenizer.cpp)
 target_include_directories(qwen3_5_ort PRIVATE
+  "${CMAKE_SOURCE_DIR}/include"
   "${ONNXRUNTIME_ROOT}/include/onnxruntime/core/session")
 target_link_libraries(qwen3_5_ort PRIVATE "${ONNXRUNTIME_LIBRARY}")
 set_target_properties(qwen3_5_ort PROPERTIES
@@ -50,8 +51,11 @@ if(BUILD_ORT_GENAI_EXAMPLE)
     endif()
   endforeach()
 
-  add_executable(qwen3_infer src/main.cpp)
-  target_include_directories(qwen3_infer PRIVATE "${ORT_GENAI_ROOT}/src")
+  add_executable(qwen3_infer src/main.cpp src/qwen3_genai.cpp)
+  target_compile_definitions(qwen3_infer PRIVATE QWEN_BACKEND_GENAI)
+  target_include_directories(qwen3_infer PRIVATE
+    "${CMAKE_SOURCE_DIR}/include"
+    "${ORT_GENAI_ROOT}/src")
   target_link_libraries(qwen3_infer PRIVATE
     "${ORT_GENAI_BUILD}/libonnxruntime-genai.so"
     "${ORT_GENAI_BUILD}/libonnxruntime.so")

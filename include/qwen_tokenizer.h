@@ -1,5 +1,10 @@
 #pragma once
 
+// ByteLevel BPE tokenizer for Qwen models, loaded from a Hugging Face
+// tokenizer.json. Encoding splits text around added (special) tokens, runs
+// the Qwen pretokenizer on ordinary spans, and applies BPE merges over
+// byte-level symbols; decoding maps symbols back to raw UTF-8 bytes.
+
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -9,9 +14,13 @@
 
 class QwenTokenizer {
  public:
+  // Loads vocab, BPE merges, and added tokens from tokenizer.json.
   explicit QwenTokenizer(const std::string& tokenizer_json);
 
+  // Encodes text into token ids; added tokens are matched atomically.
   std::vector<int64_t> Encode(const std::string& text) const;
+  // Decodes a single token id. Special tokens decode to their literal text,
+  // or to "" when skip_special is set and the token is marked special.
   std::string DecodeToken(int64_t id, bool skip_special = true) const;
 
  private:
@@ -19,8 +28,11 @@ class QwenTokenizer {
     size_t operator()(const std::pair<std::string, std::string>& value) const;
   };
 
+  // Splits ordinary text into pretoken pieces (words, numbers, symbol runs).
   std::vector<std::string> Pretokenize(const std::string& text) const;
+  // Applies BPE merges to one pretokenized piece.
   std::vector<std::string> Bpe(const std::string& piece) const;
+  // Maps raw bytes to byte-level symbols (GPT-2 style byte-to-unicode).
   std::vector<std::string> ByteEncode(const std::string& text) const;
 
   std::unordered_map<std::string, int64_t> vocab_;
